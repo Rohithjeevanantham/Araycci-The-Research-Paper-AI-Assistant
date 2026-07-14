@@ -123,7 +123,7 @@ The app is deployed on Streamlit Community Cloud: **https://araycci.streamlit.ap
 
 1. **Enter Search Query**: Input a search query for ArXiv papers.
 2. **Set Maximum Results**: Adjust the slider to set the maximum number of search results.
-3. **View and Select Papers**: View the search results and tick the papers you want.
+3. **View and Select Papers**: View the search results and tick the papers you want. A bar above the results carries **Select all** / **Clear all** buttons and a running count of how many are selected.
 4. **Download**: The selected papers are downloaded and bundled into a ZIP.
 
 > **Note:** The Web tab *fetches* papers, it does not index them. To make them queryable, switch to **Local** and upload the downloaded ZIP as-is — no need to unpack it first. The app prompts you with "You May Now Switch To Local To Proceed".

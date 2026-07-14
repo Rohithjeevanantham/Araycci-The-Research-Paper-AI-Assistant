@@ -37,8 +37,6 @@ if 'chunks' not in st.session_state:
     st.session_state.chunks = None
 if 'bm25' not in st.session_state:
     st.session_state.bm25 = None
-if 'select_all' not in st.session_state:
-    st.session_state.select_all = False
 # Each session writes its vectors into its own Pinecone namespace, so users
 # don't overwrite each other and cleanup is a fast namespace delete.
 if 'namespace' not in st.session_state:
@@ -73,7 +71,6 @@ def reset_page():
     # "End conversation" button, which renders *after* these checkboxes, and
     # Streamlit forbids writing to a widget's state once it is instantiated.
     # Deleting the key resets the widget to its default on the next run.
-    st.session_state.pop("select_all", None)
     # Only the numbered checkbox keys (selected_0, selected_1, ...) -- not
     # "selected_indices", which is ordinary state the app still reads.
     stale = [k for k in st.session_state
@@ -332,12 +329,12 @@ if Source == "Local":
             with st.spinner("Processing PDFs..."):
                 index_chunks(process_local_pdfs(pdfs))
 
-def toggle_select_all():
-    """Tick/untick every paper to match the 'Select all' box. Runs as an
-    on_change callback, i.e. before the rerun that rebuilds the checkboxes --
-    Streamlit forbids writing to a widget's state after it is instantiated."""
+def set_all_selected(selected):
+    """Tick or untick every paper at once. Runs as a button callback, i.e. before
+    the rerun that rebuilds the checkboxes -- Streamlit forbids writing to a
+    widget's state after it is instantiated."""
     for i in range(len(st.session_state.search)):
-        st.session_state[f"selected_{i}"] = st.session_state.select_all
+        st.session_state[f"selected_{i}"] = selected
 
 
 # Handle Web Search and Download
@@ -349,7 +346,6 @@ if Source == "Web":
         # onto the new results.
         for i in range(len(st.session_state.search)):
             st.session_state.pop(f"selected_{i}", None)
-        st.session_state.select_all = False
         st.session_state.search = search_arxiv(search, max_results)
         st.session_state.selected_indices = []  # Reset selection on new search
         st.session_state.download = False
@@ -357,12 +353,18 @@ if Source == "Web":
     if st.session_state.search:
         arxiv_results = st.session_state.search
         selection = {}
-
-        st.checkbox(
-            f"Select all {len(arxiv_results)} results",
-            key="select_all",
-            on_change=toggle_select_all,
+        n_selected = sum(
+            bool(st.session_state.get(f"selected_{i}")) for i in range(len(arxiv_results))
         )
+
+        # Bulk actions live in a bordered bar directly under Search, where the eye
+        # lands once results appear. This used to be a bare checkbox, which read as
+        # just another paper row and was missed entirely.
+        with st.container(border=True):
+            pick, clear, count = st.columns([1, 1, 2], vertical_alignment="center")
+            pick.button("Select all", on_click=set_all_selected, args=(True,))
+            clear.button("Clear all", on_click=set_all_selected, args=(False,))
+            count.markdown(f"**{n_selected} of {len(arxiv_results)}** papers selected")
 
         for i, result in enumerate(arxiv_results):
             st.subheader(f"{i+1}. {result['title']} ({result['published']})")
