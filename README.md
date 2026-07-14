@@ -8,7 +8,7 @@ Araycci Research Paper AI Assistant is an interactive research assistant built u
 
 ## Features
 
-- **Local PDF Processing**: Upload and process local PDF files.
+- **Local PDF Processing**: Upload and process local PDF files, individually or as a ZIP archive of PDFs.
 - **Web Search**: Search for research papers on ArXiv and download them.
 - **Clustering**: Cluster papers by similarity (TF-IDF + KMeans) so you can index one topic at a time.
 - **Hybrid Retrieval-Augmented Generation (RAG)**: Dense vector search *and* BM25 keyword search, fused with Reciprocal Rank Fusion and reranked by a cross-encoder — see [How retrieval works](#how-retrieval-works).
@@ -114,7 +114,7 @@ The app is deployed on Streamlit Community Cloud: **https://araycci.streamlit.ap
 
 ### Local PDF Processing
 
-1. **Upload PDF Files**: Use the file uploader to select one or more PDF files from your local system.
+1. **Upload PDF Files**: Use the file uploader to select one or more PDFs from your local system. You can also drop in a **ZIP of PDFs** — including the ZIP produced by the Web tab — and it is unpacked for you. Loose PDFs and ZIPs can be mixed in the same upload; non-PDF entries inside an archive are ignored.
 2. **Cluster By Similarity (optional)**: Toggle this option to cluster the text content by similarity for better organization.
 3. **View Clusters and Select**: If clustering is enabled, view the clusters and select one for processing.
 4. **Process and Index**: The selected cluster or entire PDFs will be processed. The text will be chunked and stored in Pinecone for query-based retrieval.
@@ -126,7 +126,7 @@ The app is deployed on Streamlit Community Cloud: **https://araycci.streamlit.ap
 3. **View and Select Papers**: View the search results and tick the papers you want.
 4. **Download**: The selected papers are downloaded and bundled into a ZIP.
 
-> **Note:** The Web tab *fetches* papers, it does not index them. Unzip the downloaded PDFs, then switch to **Local** and upload them to make them queryable. The app prompts you with "You May Now Switch To Local To Proceed".
+> **Note:** The Web tab *fetches* papers, it does not index them. To make them queryable, switch to **Local** and upload the downloaded ZIP as-is — no need to unpack it first. The app prompts you with "You May Now Switch To Local To Proceed".
 
 ### Query Handling
 
@@ -155,6 +155,7 @@ Available once papers have been indexed via the **Local** tab.
 
 - **app.py**: The Streamlit UI and session flow.
   - `index_chunks`: Indexes a chunk corpus for *both* halves of hybrid retrieval — dense vectors into Pinecone, and the chunk list plus its BM25 index into `st.session_state`.
+  - `expand_uploads`: Flattens the upload into individual PDFs, unpacking any ZIP archives so the Web tab's ZIP can be fed straight back in.
   - `process_local_pdfs`: Extracts and chunks uploaded PDFs (accepts either raw uploads or a clustered DataFrame).
   - `handle_query_response`: Runs retrieval, generation, translation, and audio.
   - `reset_page`: Clears all session state, including the chunk corpus and BM25 index.

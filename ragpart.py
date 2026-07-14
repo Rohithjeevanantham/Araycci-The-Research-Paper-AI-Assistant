@@ -37,6 +37,10 @@ SPARSE_TOP_K = 20   # candidates pulled from BM25
 RRF_K = 60          # Reciprocal Rank Fusion damping constant
 FINAL_TOP_N = 8     # chunks handed to the LLM after reranking
 
+# How many previous Q&A turns to carry into the prompt. Kept small: each turn
+# competes with the retrieved chunks for the model's context window.
+HISTORY_TURNS = 3
+
 EMBED_BATCH_SIZE = 64
 
 
@@ -280,35 +284,92 @@ def get_relevant_chunks(query, index, chunks, bm25, top_n=FINAL_TOP_N, namespace
     ranked = get_reranker().rank(query, candidates, top_k=top_n, return_documents=True)
     return [result['text'] for result in ranked]
 
-def generate_response_from_chunks(chunks, query):
-    combined_content = "\n".join([f"Chunk:\n{chunk}" for chunk in chunks])
-    prompt_template = (
-        "You are an AI research assistant. Your job is to help users understand and extract key insights from research papers. "
-        "You will be given a query and context from multiple research papers. Based on this information, provide accurate, concise, and helpful responses. "
-        "Here is the context from the research papers and the user's query:\n\n"
-        "Context:\n{context}\n\n"
-        "Query: {query}\n\n"
-        "Please provide a detailed and informative response based on the given context. Make sure your response is complete and ends with 'End of response.'."
-    )
-    user_query = prompt_template.format(context=combined_content, query=query)
-    
-    huggingface_token = get_secret("HUGGINGFACE_TOKEN")
-    client = InferenceClient(model=LLM_MODEL, token=huggingface_token)
-
+def chat(messages, max_tokens=500):
+    """One call to the LLM. Returns None if the request failed."""
+    client = InferenceClient(model=LLM_MODEL, token=get_secret("HUGGINGFACE_TOKEN"))
     try:
-        response = client.chat_completion(
-            messages=[{"role": "user", "content": user_query}],
-            max_tokens=500,
-            stream=False
-        )
+        response = client.chat_completion(messages=messages, max_tokens=max_tokens, stream=False)
     except HfHubHTTPError as e:
         st.error(f"Hugging Face inference request failed: {e}")
-        return "No response received."
+        return None
+    return response.choices[0].message.content if response.choices else None
 
-    if response.choices:
-        content = response.choices[0].message.content
-        if 'End of response.' in content:
-            content = content.split('End of response.')[0].strip()
-        return content
-    else:
+
+def condense_query(query, history):
+    """Rewrite a follow-up into a standalone question using the conversation.
+
+    Retrieval has no memory: "what about its limitations?" embeds and BM25-matches
+    on nothing useful, because the subject lives in an earlier turn. Rewriting it
+    to "what are the limitations of DiNAT?" is what makes follow-ups actually work.
+    """
+    if not history:
+        return query
+
+    transcript = "\n".join(
+        f"User: {turn['question']}\nAssistant: {turn['answer']}"
+        for turn in history[-HISTORY_TURNS:]
+    )
+    rewritten = chat(
+        [{
+            "role": "user",
+            "content": (
+                "Given the conversation below, rewrite the follow-up question as a "
+                "standalone question that can be understood without the conversation. "
+                "Resolve any pronouns or references to earlier turns. If it is already "
+                "standalone, repeat it unchanged. Reply with the question and nothing else.\n\n"
+                f"Conversation:\n{transcript}\n\n"
+                f"Follow-up question: {query}\n\n"
+                "Standalone question:"
+            ),
+        }],
+        max_tokens=100,
+    )
+    if not rewritten:
+        return query  # condensing failed; fall back to the raw question
+
+    rewritten = rewritten.strip().strip('"')
+    # A rewrite that collapses to nothing (or rambles) is worse than the original.
+    if not rewritten or len(rewritten) > 4 * len(query) + 200:
+        return query
+    return rewritten
+
+
+def generate_response_from_chunks(chunks, query, history=None):
+    """Answer `query` from the retrieved chunks, aware of the conversation so far.
+
+    Prior turns are sent as real user/assistant messages rather than pasted into
+    the prompt, so the model treats them as dialogue rather than as source material
+    it should quote from.
+    """
+    combined_content = "\n".join([f"Chunk:\n{chunk}" for chunk in chunks])
+
+    messages = [{
+        "role": "system",
+        "content": (
+            "You are an AI research assistant. You help users understand and extract key "
+            "insights from research papers. Answer using the context from the papers that "
+            "is provided with each question, and stay consistent with the earlier "
+            "conversation. If the context does not contain the answer, say so rather than "
+            "guessing. Be accurate, concise, and helpful."
+        ),
+    }]
+
+    for turn in (history or [])[-HISTORY_TURNS:]:
+        messages.append({"role": "user", "content": turn["question"]})
+        messages.append({"role": "assistant", "content": turn["answer"]})
+
+    messages.append({
+        "role": "user",
+        "content": (
+            f"Context from the research papers:\n{combined_content}\n\n"
+            f"Question: {query}\n\n"
+            "Answer using the context above."
+        ),
+    })
+
+    content = chat(messages, max_tokens=500)
+    if not content:
         return "No response received."
+    if 'End of response.' in content:
+        content = content.split('End of response.')[0].strip()
+    return content

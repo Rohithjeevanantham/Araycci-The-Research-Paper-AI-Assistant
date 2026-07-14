@@ -1,9 +1,12 @@
+import io
+import zipfile
+
 import streamlit as st
 import pandas as pd
 from ragpart import (generate_response_from_chunks, get_relevant_chunks, create_index,
                      extract_text_from_pdf, clean_text, store_chunks_in_pinecone,
                      combined_chunking, build_bm25, get_embedding_model, get_reranker,
-                     new_namespace, clear_namespace)
+                     new_namespace, clear_namespace, condense_query)
 from translate import translate, generate_audio
 from arxiv import search_arxiv, process_docs2, clustering, text_from_file_uploader, tokenize_text
 
@@ -40,6 +43,11 @@ if 'select_all' not in st.session_state:
 # don't overwrite each other and cleanup is a fast namespace delete.
 if 'namespace' not in st.session_state:
     st.session_state.namespace = None
+# Conversation so far. Each turn holds the English question/answer (what the LLM
+# is given) plus what was shown to the user, which differ when a language other
+# than English is selected.
+if 'history' not in st.session_state:
+    st.session_state.history = []
 
 def reset_page():
     # Drop this session's vectors first -- this needs the index and namespace,
@@ -59,6 +67,7 @@ def reset_page():
     st.session_state.cluster = None
     st.session_state.chunks = None
     st.session_state.bm25 = None
+    st.session_state.history = []
 
     # Widget keys must be deleted, not assigned: reset_page() can run from the
     # "End conversation" button, which renders *after* these checkboxes, and
@@ -101,6 +110,47 @@ def chunks_for_text(text):
     """Chunking keyed on the text itself, so re-indexing the same papers (e.g.
     after picking a different cluster) skips the work entirely."""
     return combined_chunking(clean_text(text))
+
+
+def pdf_buffer(data, name):
+    """A PDF as the rest of the app expects it: something with .read() and .name."""
+    buf = io.BytesIO(data)
+    buf.name = name  # clustering labels each paper by its filename
+    return buf
+
+
+def expand_uploads(uploaded_files):
+    """Flatten the upload into individual PDFs, unpacking any ZIP archives.
+
+    The Web tab hands papers back as a ZIP, so Local accepts one directly rather
+    than sending the user through their file manager to unpack it first.
+
+    Returns buffers rather than the raw UploadedFile because clustering and
+    chunking both read the same paper, and a read pointer left at EOF by the
+    first of them yields an empty PDF for the second.
+    """
+    pdfs, bad_zips = [], []
+
+    for upload in uploaded_files:
+        if not upload.name.lower().endswith(".zip"):
+            pdfs.append(pdf_buffer(upload.getvalue(), upload.name))
+            continue
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(upload.getvalue())) as archive:
+                for entry in archive.infolist():
+                    # __MACOSX carries resource forks that masquerade as PDFs.
+                    if entry.is_dir() or entry.filename.startswith("__MACOSX/"):
+                        continue
+                    if not entry.filename.lower().endswith(".pdf"):
+                        continue
+                    # Zip entries are paths; papers are named by their basename.
+                    name = entry.filename.rsplit("/", 1)[-1]
+                    pdfs.append(pdf_buffer(archive.read(entry), name))
+        except zipfile.BadZipFile:
+            bad_zips.append(upload.name)
+
+    return pdfs, bad_zips
 
 
 def process_local_pdfs(data):
@@ -175,32 +225,92 @@ def download_and_process_arxiv(selection, arxiv_results):
         mime="application/zip"
     )
 
-def handle_query_response(query, lang):
+def handle_query_response(query, lang, display_query):
+    """Answer one turn and append it to the conversation history.
+
+    `query` is always English (the app translates before it gets here), which is
+    what retrieval and the LLM see. `display_query` is what the user actually
+    typed, which is what gets shown back to them.
+    """
+    history = st.session_state.history
+
+    # Follow-ups like "what about its limitations?" carry their subject in an
+    # earlier turn, and retrieval has no memory -- so resolve the question
+    # against the conversation before searching with it.
+    search_query = condense_query(query, history)
+
     relevant_chunks = get_relevant_chunks(
-        query,
+        search_query,
         st.session_state.index,
         st.session_state.chunks,
         st.session_state.bm25,
         namespace=st.session_state.namespace,
     )
-    response = generate_response_from_chunks(relevant_chunks, query)
+
+    # Generate from the question the user actually asked, not the rewritten one:
+    # the rewrite is tuned for search and drops instructions like "summarise that
+    # in one sentence". The model has the history, so it can resolve the reference
+    # itself.
+    response = generate_response_from_chunks(relevant_chunks, query, history=history)
+
     if lang != "English":
-        translated_response = translate(response, lang, True)
-        st.write(translated_response)
-        audio_io = generate_audio(translated_response, lang)
+        display_response = translate(response, lang, True)
     else:
-        st.write(response)
-        audio_io = generate_audio(response, lang)
-    st.audio(audio_io, format='audio/mp3')
-    st.download_button(label="Download Audio Response", data=audio_io, file_name="response.mp3", mime="audio/mp3")
+        display_response = response
+
+    audio_bytes = generate_audio(display_response, lang).getvalue()
+
+    history.append({
+        "question": query,                  # English: fed back to the LLM
+        "answer": response,                 # English: fed back to the LLM
+        "display_question": display_query,  # what the user typed
+        "display_answer": display_response,
+        "audio": audio_bytes,
+        "rewritten": search_query if search_query != query else None,
+    })
+
+
+def render_history():
+    """Show every turn of the current session, oldest first."""
+    for i, turn in enumerate(st.session_state.history):
+        with st.chat_message("user"):
+            st.write(turn["display_question"])
+        with st.chat_message("assistant"):
+            st.write(turn["display_answer"])
+            if turn["rewritten"]:
+                st.caption(f"Searched for: {turn['rewritten']}")
+            st.audio(turn["audio"], format="audio/mp3")
+            st.download_button(
+                label="Download Audio Response",
+                data=turn["audio"],
+                file_name=f"response_{i + 1}.mp3",
+                mime="audio/mp3",
+                # Every widget needs a unique key, or the second turn's button
+                # collides with the first's and Streamlit raises.
+                key=f"audio_dl_{i}",
+            )
 
 # Handle Local PDF Processing
 if Source == "Local":
-    data = st.sidebar.file_uploader("Upload a PDF", type="pdf", accept_multiple_files=True)
+    data = st.sidebar.file_uploader(
+        "Upload PDFs or a ZIP of PDFs",
+        type=["pdf", "zip"],
+        accept_multiple_files=True,
+    )
     if data and not st.session_state.papers_downloaded:
-        
-        if st.toggle("Cluster By Similarity", value=True):
-            pdf_texts = text_from_file_uploader(data)
+        pdfs, bad_zips = expand_uploads(data)
+
+        for name in bad_zips:
+            st.error(f"Could not open `{name}` — it is not a valid ZIP file.")
+
+        if any(upload.name.lower().endswith(".zip") for upload in data):
+            st.caption(f"{len(pdfs)} PDFs found in the upload.")
+
+        if not pdfs:
+            st.warning("No PDFs found in the upload.")
+
+        elif st.toggle("Cluster By Similarity", value=True):
+            pdf_texts = text_from_file_uploader(pdfs)
             processed_documents = tokenize_text(pdf_texts)
             result_df, fig = clustering(pdf_texts, processed_documents)
             if fig != "Error":
@@ -220,7 +330,7 @@ if Source == "Local":
 
         else:
             with st.spinner("Processing PDFs..."):
-                index_chunks(process_local_pdfs(data))
+                index_chunks(process_local_pdfs(pdfs))
 
 def toggle_select_all():
     """Tick/untick every paper to match the 'Select all' box. Runs as an
@@ -280,17 +390,22 @@ if Source == "Web":
               
 # Query handling
 if st.session_state.index:
+    render_history()
+
     query = st.text_input("Enter your question:")
-    if query:
-        if lang!="English":
-            translated_query = translate(query, lang, False)
-            st.session_state.query = translated_query
-        else:
-            st.session_state.query = query
-    if st.button("Ask") and st.session_state.query:
+
+    if st.button("Ask") and query:
+        # Retrieval and the LLM work in English; translate the question on the
+        # way in, and the answer back on the way out.
+        english_query = query if lang == "English" else translate(query, lang, False)
+        st.session_state.query = english_query
+
         with st.spinner("Searching for answers..."):
-            handle_query_response(st.session_state.query, lang)
-        
+            handle_query_response(english_query, lang, display_query=query)
+        # Re-run so the new turn renders through render_history() with the rest
+        # of the conversation, instead of being appended below the input box.
+        st.rerun()
+
     if st.button("End conversation"):
         reset_page()
         st.rerun()
