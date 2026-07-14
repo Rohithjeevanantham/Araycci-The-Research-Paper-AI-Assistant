@@ -1,34 +1,56 @@
-import os
 import fitz  # PyMuPDF
 import re
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone, ServerlessSpec
 from huggingface_hub import InferenceClient
+from huggingface_hub.errors import HfHubHTTPError
 import sys
 import json
 
-# Initialize Pinecone
-# Initialize Pinecone
-pinecone_api_key = st.secrets["general"]["PINECONE_API_KEY"]
 pinecone_environment = "us-east-1"
-if not pinecone_api_key:
-    raise ValueError("Pinecone API key not found. Please set it in the environment variables.")
-pc = Pinecone(api_key=pinecone_api_key)
-
-# Model initialization
-model = SentenceTransformer('all-MiniLM-L6-v2')
 
 # Pinecone index name
 index_name = "llama3"
 
+# LLM used for answering queries (served via Hugging Face Inference Providers)
+LLM_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+
+
+def get_secret(key):
+    try:
+        value = st.secrets["general"][key]
+    except (KeyError, FileNotFoundError):
+        value = None
+    if not value:
+        st.error(
+            f"Missing `{key}`. Add it to `.streamlit/secrets.toml` under the "
+            "`[general]` section."
+        )
+        st.stop()
+    return value
+
+
+@st.cache_resource
+def get_pinecone_client():
+    return Pinecone(api_key=get_secret("PINECONE_API_KEY"))
+
+
+@st.cache_resource
+def get_embedding_model():
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+
 def create_index():
-    if index_name in pc.list_indexes().names():
+    # Deletes and recreates the index each session: this app is single-user
+    # and treats the index as scratch space for the currently loaded papers.
+    pc = get_pinecone_client()
+    if pc.has_index(index_name):
         pc.delete_index(index_name)
     pc.create_index(
-        name=index_name, 
+        name=index_name,
         dimension=384,
-        metric='cosine', 
+        metric='cosine',
         spec=ServerlessSpec(
             cloud='aws',
             region=pinecone_environment
@@ -84,7 +106,7 @@ def combined_chunking(text):
     return final_chunks
 
 def store_chunks_in_pinecone(chunks, index, max_batch_size_mb=2):
-    chunk_embeddings = model.encode(chunks)
+    chunk_embeddings = get_embedding_model().encode(chunks)
     vectors = [{"id": f"chunk-{i}", "values": embedding.tolist(), "metadata": {"content": chunk, "type": "chunk"}}
                for i, (embedding, chunk) in enumerate(zip(chunk_embeddings, chunks))]
 
@@ -107,7 +129,7 @@ def store_chunks_in_pinecone(chunks, index, max_batch_size_mb=2):
         index.upsert(current_batch)
 
 def get_relevant_chunks(query, index, top_k=5):
-    query_embedding = model.encode([query])[0].tolist()
+    query_embedding = get_embedding_model().encode([query])[0].tolist()
     search_results = index.query(vector=query_embedding, top_k=top_k, include_metadata=True)
     chunks = [result['metadata']['content'] for result in search_results['matches']]
     return chunks
@@ -124,19 +146,21 @@ def generate_response_from_chunks(chunks, query):
     )
     user_query = prompt_template.format(context=combined_content, query=query)
     
-    huggingface_token = st.secrets["general"]["HUGGINGFACE_TOKEN"]
-    client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct", token=huggingface_token)
+    huggingface_token = get_secret("HUGGINGFACE_TOKEN")
+    client = InferenceClient(model=LLM_MODEL, token=huggingface_token)
 
-    # Generate the response
-    response = client.chat_completion(
-        messages=[{"role": "user", "content": user_query}], 
-        max_tokens=500,  # Keep the max_tokens as specified
-        stream=False
-    )
+    try:
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": user_query}],
+            max_tokens=500,
+            stream=False
+        )
+    except HfHubHTTPError as e:
+        st.error(f"Hugging Face inference request failed: {e}")
+        return "No response received."
 
-    # Check if response is received and contains the end signal
-    if response and 'choices' in response and response['choices']:
-        content = response['choices'][0]['message']['content']
+    if response.choices:
+        content = response.choices[0].message.content
         if 'End of response.' in content:
             content = content.split('End of response.')[0].strip()
         return content

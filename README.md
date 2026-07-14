@@ -38,9 +38,15 @@ Araycci Research Paper AI Assistant is an interactive research assistant built u
     pip install -r requirements.txt
     ```
 
-4. **Set up your environment variables**:
-    - **Pinecone API Key**: Set up your Pinecone API key as an environment variable.
-    - **Other necessary keys**: Depending on your translation and TTS services, set up those API keys.
+4. **Set up your secrets**:
+    Create `.streamlit/secrets.toml` (gitignored) with:
+    ```toml
+    [general]
+    PINECONE_API_KEY = "your-pinecone-api-key"
+    HUGGINGFACE_TOKEN = "your-huggingface-token"
+    ```
+    - **Pinecone API Key**: used for the vector index storing document chunks.
+    - **Hugging Face Token**: used to query `meta-llama/Llama-3.1-8B-Instruct` via Hugging Face Inference Providers (the token needs access to the Llama model, which requires accepting Meta's license on the model page).
 
 ## Usage
 
@@ -81,7 +87,7 @@ Araycci Research Paper AI Assistant is an interactive research assistant built u
 
 ## Modules
 
-- **RAG.py**: Handles retrieval-augmented generation, chunking, and text processing.
+- **ragpart.py**: Handles retrieval-augmented generation, chunking, and text processing. Answers are generated with `meta-llama/Llama-3.1-8B-Instruct` via Hugging Face Inference Providers.
   - `generate_response_from_chunks`: Generates responses based on relevant text chunks.
   - `get_relevant_chunks`: Retrieves relevant chunks for a given query.
   - `create_index`: Creates a Pinecone index.

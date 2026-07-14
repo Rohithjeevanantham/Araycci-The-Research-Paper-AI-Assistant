@@ -1,8 +1,5 @@
-import os
 from gtts import gTTS
 import io
-from tokens import token_size
-import streamlit as st
 from deep_translator import GoogleTranslator
 import textwrap
 

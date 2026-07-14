@@ -158,9 +158,7 @@ if Source == "Web":
             st.write(f"**Summary:** {result['summary']}")
             st.write(f"**Link:** [arXiv Paper]({result['link']})")
 
-            if f"selected_{i}" not in st.session_state:
-                st.session_state[f"selected_{i}"] = False
-            selection[f"selected_{i}"] = st.checkbox("Download Paper", key=f"selected_{i}", value=st.session_state[f"selected_{i}"])
+            selection[f"selected_{i}"] = st.checkbox("Download Paper", key=f"selected_{i}")
 
         selected_indices = [i for i in range(len(arxiv_results)) if selection[f"selected_{i}"]]
 
