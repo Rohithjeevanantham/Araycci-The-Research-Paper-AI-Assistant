@@ -1,6 +1,9 @@
 import streamlit as st
 import pandas as pd
-from ragpart import generate_response_from_chunks, get_relevant_chunks, create_index, extract_text_from_pdf, clean_text, store_chunks_in_pinecone, combined_chunking, build_bm25
+from ragpart import (generate_response_from_chunks, get_relevant_chunks, create_index,
+                     extract_text_from_pdf, clean_text, store_chunks_in_pinecone,
+                     combined_chunking, build_bm25, get_embedding_model, get_reranker,
+                     new_namespace, clear_namespace)
 from translate import translate, generate_audio
 from arxiv import search_arxiv, process_docs2, clustering, text_from_file_uploader, tokenize_text
 
@@ -33,9 +36,19 @@ if 'bm25' not in st.session_state:
     st.session_state.bm25 = None
 if 'select_all' not in st.session_state:
     st.session_state.select_all = False
+# Each session writes its vectors into its own Pinecone namespace, so users
+# don't overwrite each other and cleanup is a fast namespace delete.
+if 'namespace' not in st.session_state:
+    st.session_state.namespace = None
 
 def reset_page():
+    # Drop this session's vectors first -- this needs the index and namespace,
+    # which the lines below are about to clear.
+    if st.session_state.index is not None and st.session_state.namespace:
+        clear_namespace(st.session_state.index, st.session_state.namespace)
+
     st.session_state.index = None
+    st.session_state.namespace = None
     st.session_state.search = []
     st.session_state.query = None
     st.session_state.papers_downloaded = False
@@ -46,7 +59,18 @@ def reset_page():
     st.session_state.cluster = None
     st.session_state.chunks = None
     st.session_state.bm25 = None
-    st.session_state.select_all = False
+
+    # Widget keys must be deleted, not assigned: reset_page() can run from the
+    # "End conversation" button, which renders *after* these checkboxes, and
+    # Streamlit forbids writing to a widget's state once it is instantiated.
+    # Deleting the key resets the widget to its default on the next run.
+    st.session_state.pop("select_all", None)
+    # Only the numbered checkbox keys (selected_0, selected_1, ...) -- not
+    # "selected_indices", which is ordinary state the app still reads.
+    stale = [k for k in st.session_state
+             if k.startswith("selected_") and k.split("_", 1)[1].isdigit()]
+    for key in stale:
+        st.session_state.pop(key, None)
 
 # Streamlit app
 st.sidebar.image("logo.jpg")
@@ -63,10 +87,25 @@ Source = st.radio(
 )
 
 
+# Load the models now, while the user is still choosing papers, rather than
+# making them wait for it once indexing starts. Both are cached, so this is a
+# no-op on every rerun after the first.
+with st.spinner("Warming up models (first run downloads ~150 MB)..."):
+    get_embedding_model()
+    get_reranker()
+
+
+
+@st.cache_data(show_spinner=False)
+def chunks_for_text(text):
+    """Chunking keyed on the text itself, so re-indexing the same papers (e.g.
+    after picking a different cluster) skips the work entirely."""
+    return combined_chunking(clean_text(text))
+
 
 def process_local_pdfs(data):
     combined_chunks = []
-    
+
     # Check if data is a DataFrame
     if isinstance(data, pd.DataFrame):
         data = data.to_dict()
@@ -75,29 +114,55 @@ def process_local_pdfs(data):
     # If data is a list of uploaded files
     for pdf_file in data:
         if isinstance(data, dict) and isinstance(data[pdf_file], str):
-            text = data[pdf_file]  
+            text = data[pdf_file]
         else:
             text = extract_text_from_pdf(pdf_file)
-        
-        cleaned_text = clean_text(text)
-        chunks = combined_chunking(cleaned_text)
-        combined_chunks.extend(chunks)
-    
+
+        combined_chunks.extend(chunks_for_text(text))
+
     return combined_chunks
 
 
 def index_chunks(combined_chunks):
     """Index chunks for both halves of hybrid retrieval: dense vectors into
-    Pinecone, and the chunk corpus + BM25 index into the session."""
-    st.session_state.index = create_index()
-    if not st.session_state.index:
-        st.error("Failed to create Pinecone index.")
-        return
+    Pinecone, and the chunk corpus + BM25 index into the session.
 
-    store_chunks_in_pinecone(combined_chunks, st.session_state.index)
-    st.session_state.chunks = combined_chunks
-    st.session_state.bm25 = build_bm25(combined_chunks)
+    Indexing takes tens of seconds (model load, then ~30-40 ms of embedding per
+    chunk), so each stage reports progress rather than hiding behind one spinner.
+    """
+    n = len(combined_chunks)
+    status = st.status(f"Indexing {n} chunks...", expanded=True)
+
+    with status:
+        st.write("Connecting to Pinecone...")
+        st.session_state.index = create_index()
+        if not st.session_state.index:
+            status.update(label="Indexing failed", state="error")
+            st.error("Failed to create Pinecone index.")
+            return
+
+        # Reuse this session's namespace, clearing any vectors from a previous
+        # indexing run so stale chunks can't be retrieved.
+        if st.session_state.namespace:
+            clear_namespace(st.session_state.index, st.session_state.namespace)
+        else:
+            st.session_state.namespace = new_namespace()
+
+        st.write(f"Embedding and uploading {n} chunks...")
+        bar = st.progress(0.0)
+        store_chunks_in_pinecone(
+            combined_chunks,
+            st.session_state.index,
+            progress=lambda frac: bar.progress(frac, text=f"{int(frac * n)} / {n} chunks"),
+            namespace=st.session_state.namespace,
+        )
+
+        st.write("Building BM25 keyword index...")
+        st.session_state.chunks = combined_chunks
+        st.session_state.bm25 = build_bm25(combined_chunks)
+
     st.session_state.papers_downloaded = True
+    status.update(label=f"Indexed {n} chunks. Ready for questions.", state="complete")
     st.success("PDF processed and indexed successfully!")
 
 
@@ -116,6 +181,7 @@ def handle_query_response(query, lang):
         st.session_state.index,
         st.session_state.chunks,
         st.session_state.bm25,
+        namespace=st.session_state.namespace,
     )
     response = generate_response_from_chunks(relevant_chunks, query)
     if lang != "English":
