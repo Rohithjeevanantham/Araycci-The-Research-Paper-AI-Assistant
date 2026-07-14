@@ -1,7 +1,9 @@
 import fitz  # PyMuPDF
 import re
+import numpy as np
 import streamlit as st
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
+from rank_bm25 import BM25Okapi
 from pinecone import Pinecone, ServerlessSpec
 from huggingface_hub import InferenceClient
 from huggingface_hub.errors import HfHubHTTPError
@@ -15,6 +17,15 @@ index_name = "llama3"
 
 # LLM used for answering queries (served via Hugging Face Inference Providers)
 LLM_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+
+# Reranker applied to the fused dense+sparse candidates
+RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L6-v2"
+
+# Hybrid retrieval settings
+DENSE_TOP_K = 20    # candidates pulled from Pinecone
+SPARSE_TOP_K = 20   # candidates pulled from BM25
+RRF_K = 60          # Reciprocal Rank Fusion damping constant
+FINAL_TOP_N = 5     # chunks handed to the LLM after reranking
 
 
 def get_secret(key):
@@ -39,6 +50,11 @@ def get_pinecone_client():
 @st.cache_resource
 def get_embedding_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
+
+
+@st.cache_resource
+def get_reranker():
+    return CrossEncoder(RERANKER_MODEL)
 
 
 def create_index():
@@ -105,9 +121,21 @@ def combined_chunking(text):
             final_chunks.extend(semantic_chunks)
     return final_chunks
 
+def bm25_tokenize(text):
+    # Shared by corpus and query so BM25 scores both sides the same way.
+    return re.findall(r"\w+", text.lower())
+
+
+def build_bm25(chunks):
+    return BM25Okapi([bm25_tokenize(chunk) for chunk in chunks])
+
+
 def store_chunks_in_pinecone(chunks, index, max_batch_size_mb=2):
     chunk_embeddings = get_embedding_model().encode(chunks)
-    vectors = [{"id": f"chunk-{i}", "values": embedding.tolist(), "metadata": {"content": chunk, "type": "chunk"}}
+    # "idx" is the chunk's position in the corpus list, which is what lets dense
+    # hits be fused with BM25 hits by position.
+    vectors = [{"id": f"chunk-{i}", "values": embedding.tolist(),
+                "metadata": {"content": chunk, "type": "chunk", "idx": i}}
                for i, (embedding, chunk) in enumerate(zip(chunk_embeddings, chunks))]
 
     # Split vectors into batches that are under the maximum batch size
@@ -128,11 +156,44 @@ def store_chunks_in_pinecone(chunks, index, max_batch_size_mb=2):
     if current_batch:
         index.upsert(current_batch)
 
-def get_relevant_chunks(query, index, top_k=5):
+def dense_search(query, index, top_k=DENSE_TOP_K):
+    """Semantic search via Pinecone. Returns corpus indices, best first."""
     query_embedding = get_embedding_model().encode([query])[0].tolist()
     search_results = index.query(vector=query_embedding, top_k=top_k, include_metadata=True)
-    chunks = [result['metadata']['content'] for result in search_results['matches']]
-    return chunks
+    return [int(match['metadata']['idx']) for match in search_results['matches']]
+
+
+def sparse_search(query, bm25, top_k=SPARSE_TOP_K):
+    """Keyword search via BM25. Returns corpus indices, best first."""
+    scores = bm25.get_scores(bm25_tokenize(query))
+    ranked = np.argsort(scores)[::-1][:top_k]
+    return [int(i) for i in ranked if scores[i] > 0]
+
+
+def reciprocal_rank_fusion(rankings, k=RRF_K):
+    """Merge ranked lists of corpus indices into one, scoring each entry by
+    1/(k + rank). Rank position is used rather than the underlying scores,
+    since cosine similarity and BM25 scores are not on a comparable scale."""
+    fused_scores = {}
+    for ranking in rankings:
+        for rank, idx in enumerate(ranking):
+            fused_scores[idx] = fused_scores.get(idx, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(fused_scores, key=fused_scores.get, reverse=True)
+
+
+def get_relevant_chunks(query, index, chunks, bm25, top_n=FINAL_TOP_N):
+    """Hybrid retrieval: dense + BM25 candidates, fused with RRF, then reranked
+    by a cross-encoder down to the chunks worth sending to the LLM."""
+    dense_hits = dense_search(query, index)
+    sparse_hits = sparse_search(query, bm25) if bm25 is not None else []
+
+    candidate_indices = reciprocal_rank_fusion([dense_hits, sparse_hits])
+    candidates = [chunks[i] for i in candidate_indices if 0 <= i < len(chunks)]
+    if not candidates:
+        return []
+
+    ranked = get_reranker().rank(query, candidates, top_k=top_n, return_documents=True)
+    return [result['text'] for result in ranked]
 
 def generate_response_from_chunks(chunks, query):
     combined_content = "\n".join([f"Chunk:\n{chunk}" for chunk in chunks])
@@ -166,22 +227,3 @@ def generate_response_from_chunks(chunks, query):
         return content
     else:
         return "No response received."
-
-
-def process_pdfs(pdf_files, query, index):
-    nested_texts = []
-
-    # Extract and clean text from each PDF, store in a nested list
-    for pdf_file in pdf_files:
-        text = extract_text_from_pdf(pdf_file)
-        cleaned_text = clean_text(text)
-        nested_texts.append(cleaned_text)
-
-    # Chunk each list of texts and store in Pinecone
-    for text in nested_texts:
-        chunks = combined_chunking(text)
-        store_chunks_in_pinecone(chunks, index)
-
-    relevant_chunks = get_relevant_chunks(query, index)
-    response = generate_response_from_chunks(relevant_chunks, query)
-    return response

@@ -8,7 +8,7 @@ Araycci Research Paper AI Assistant is an interactive research assistant built u
 - **Local PDF Processing**: Upload and process local PDF files.
 - **Web Search**: Search for research papers on ArXiv and download them.
 - **Clustering**: Cluster text content for better organization and analysis.
-- **Retrieval-Augmented Generation (RAG)**: Answer queries based on the processed text.
+- **Hybrid Retrieval-Augmented Generation (RAG)**: Answer queries based on the processed text. Retrieval combines dense vector search (Pinecone) with BM25 keyword search, fuses the two rankings with Reciprocal Rank Fusion, and reranks the candidates with a cross-encoder before passing the best chunks to the LLM.
 - **Translation**: Translate responses into English, French, or Spanish.
 - **Audio Generation**: Generate audio responses for the translated text.
 
@@ -87,9 +87,13 @@ Araycci Research Paper AI Assistant is an interactive research assistant built u
 
 ## Modules
 
-- **ragpart.py**: Handles retrieval-augmented generation, chunking, and text processing. Answers are generated with `meta-llama/Llama-3.1-8B-Instruct` via Hugging Face Inference Providers.
+- **ragpart.py**: Handles hybrid retrieval-augmented generation, chunking, and text processing. Answers are generated with `meta-llama/Llama-3.1-8B-Instruct` via Hugging Face Inference Providers.
   - `generate_response_from_chunks`: Generates responses based on relevant text chunks.
-  - `get_relevant_chunks`: Retrieves relevant chunks for a given query.
+  - `get_relevant_chunks`: Hybrid retrieval — runs `dense_search` and `sparse_search`, fuses them with `reciprocal_rank_fusion`, then reranks with a cross-encoder (`cross-encoder/ms-marco-MiniLM-L6-v2`).
+  - `dense_search`: Semantic search over the Pinecone vector index.
+  - `sparse_search`: BM25 keyword search over the session's chunk corpus.
+  - `reciprocal_rank_fusion`: Merges the dense and sparse rankings without needing comparable scores.
+  - `build_bm25`: Builds the BM25 index from the chunk corpus.
   - `create_index`: Creates a Pinecone index.
   - `extract_text_from_pdf`: Extracts text from PDF files.
   - `clean_text`: Cleans the extracted text.

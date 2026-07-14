@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from ragpart import generate_response_from_chunks, get_relevant_chunks, create_index, extract_text_from_pdf, clean_text, store_chunks_in_pinecone, combined_chunking
+from ragpart import generate_response_from_chunks, get_relevant_chunks, create_index, extract_text_from_pdf, clean_text, store_chunks_in_pinecone, combined_chunking, build_bm25
 from translate import translate, generate_audio
 from arxiv import search_arxiv, process_docs2, clustering, text_from_file_uploader, tokenize_text
 
@@ -25,6 +25,12 @@ if 'selected_indices' not in st.session_state:
     st.session_state.selected_indices = []
 if 'cluster' not in st.session_state:
     st.session_state.cluster = None
+# Chunk corpus and its BM25 index: the sparse half of hybrid retrieval scores
+# against these, so they have to outlive the indexing step.
+if 'chunks' not in st.session_state:
+    st.session_state.chunks = None
+if 'bm25' not in st.session_state:
+    st.session_state.bm25 = None
 
 def reset_page():
     st.session_state.index = None
@@ -36,6 +42,8 @@ def reset_page():
     st.session_state.selected_cluster = None
     st.session_state.selected_indices = []
     st.session_state.cluster = None
+    st.session_state.chunks = None
+    st.session_state.bm25 = None
 
 # Streamlit app
 st.sidebar.image("logo.jpg")
@@ -75,6 +83,21 @@ def process_local_pdfs(data):
     return combined_chunks
 
 
+def index_chunks(combined_chunks):
+    """Index chunks for both halves of hybrid retrieval: dense vectors into
+    Pinecone, and the chunk corpus + BM25 index into the session."""
+    st.session_state.index = create_index()
+    if not st.session_state.index:
+        st.error("Failed to create Pinecone index.")
+        return
+
+    store_chunks_in_pinecone(combined_chunks, st.session_state.index)
+    st.session_state.chunks = combined_chunks
+    st.session_state.bm25 = build_bm25(combined_chunks)
+    st.session_state.papers_downloaded = True
+    st.success("PDF processed and indexed successfully!")
+
+
 def download_and_process_arxiv(selection, arxiv_results):
     zip_file = process_docs2(selection, arxiv_results)
     st.download_button(
@@ -85,7 +108,12 @@ def download_and_process_arxiv(selection, arxiv_results):
     )
 
 def handle_query_response(query, lang):
-    relevant_chunks = get_relevant_chunks(query, st.session_state.index)
+    relevant_chunks = get_relevant_chunks(
+        query,
+        st.session_state.index,
+        st.session_state.chunks,
+        st.session_state.bm25,
+    )
     response = generate_response_from_chunks(relevant_chunks, query)
     if lang != "English":
         translated_response = translate(response, lang, True)
@@ -116,28 +144,14 @@ if Source == "Local":
                     result_df = result_df[result_df['Cluster'] == selected_cluster]
 
                     with st.spinner("Processing PDFs..."):
-                        combined_chunks = process_local_pdfs(result_df)
-                        st.session_state.index = create_index()
-                        if st.session_state.index:
-                            store_chunks_in_pinecone(combined_chunks, st.session_state.index)
-                            st.session_state.papers_downloaded = True
-                            st.success("PDF processed and indexed successfully!")
-                        else:
-                            st.error("Failed to create Pinecone index.")
+                        index_chunks(process_local_pdfs(result_df))
 
             else:
                 st.write("Too Few Papers for Clustering")
 
         else:
             with st.spinner("Processing PDFs..."):
-                combined_chunks = process_local_pdfs(data)
-                st.session_state.index = create_index()
-                if st.session_state.index:
-                    store_chunks_in_pinecone(combined_chunks, st.session_state.index)
-                    st.session_state.papers_downloaded = True
-                    st.success("PDF processed and indexed successfully!")
-                else:
-                    st.error("Failed to create Pinecone index.")
+                index_chunks(process_local_pdfs(data))
 
 # Handle Web Search and Download
 if Source == "Web":

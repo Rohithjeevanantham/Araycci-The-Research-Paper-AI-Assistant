@@ -1,6 +1,7 @@
 streamlit>=1.40,<2
 PyMuPDF>=1.24,<2
 sentence-transformers>=3,<6
+rank-bm25>=0.2.2,<1
 pinecone>=7,<10
 huggingface-hub>=1.0,<2
 gTTS>=2.5,<3
