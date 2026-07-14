@@ -31,6 +31,8 @@ if 'chunks' not in st.session_state:
     st.session_state.chunks = None
 if 'bm25' not in st.session_state:
     st.session_state.bm25 = None
+if 'select_all' not in st.session_state:
+    st.session_state.select_all = False
 
 def reset_page():
     st.session_state.index = None
@@ -44,6 +46,7 @@ def reset_page():
     st.session_state.cluster = None
     st.session_state.chunks = None
     st.session_state.bm25 = None
+    st.session_state.select_all = False
 
 # Streamlit app
 st.sidebar.image("logo.jpg")
@@ -153,11 +156,24 @@ if Source == "Local":
             with st.spinner("Processing PDFs..."):
                 index_chunks(process_local_pdfs(data))
 
+def toggle_select_all():
+    """Tick/untick every paper to match the 'Select all' box. Runs as an
+    on_change callback, i.e. before the rerun that rebuilds the checkboxes --
+    Streamlit forbids writing to a widget's state after it is instantiated."""
+    for i in range(len(st.session_state.search)):
+        st.session_state[f"selected_{i}"] = st.session_state.select_all
+
+
 # Handle Web Search and Download
 if Source == "Web":
     search = st.text_input("Enter the search query: ")
     max_results = st.slider("Maximum results:", 10, 100)
     if st.button("Search"):
+        # Drop the previous search's checkbox state, or stale ticks carry over
+        # onto the new results.
+        for i in range(len(st.session_state.search)):
+            st.session_state.pop(f"selected_{i}", None)
+        st.session_state.select_all = False
         st.session_state.search = search_arxiv(search, max_results)
         st.session_state.selected_indices = []  # Reset selection on new search
         st.session_state.download = False
@@ -165,6 +181,12 @@ if Source == "Web":
     if st.session_state.search:
         arxiv_results = st.session_state.search
         selection = {}
+
+        st.checkbox(
+            f"Select all {len(arxiv_results)} results",
+            key="select_all",
+            on_change=toggle_select_all,
+        )
 
         for i, result in enumerate(arxiv_results):
             st.subheader(f"{i+1}. {result['title']} ({result['published']})")
