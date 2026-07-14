@@ -25,14 +25,14 @@ query ──┬─ dense  : MiniLM embedding → Pinecone            → top 20 
                               │
                     Reciprocal Rank Fusion (k=60)
                               │
-                  cross-encoder rerank → top 5 chunks
+                  cross-encoder rerank → top 8 chunks
                               │
                         Llama 3.1 8B Instruct
 ```
 
 **Why hybrid?** Dense (semantic) search alone misses exact tokens — author names, method names, acronyms, numeric results — which are exactly what research-paper questions hinge on. BM25 catches those literal matches, while dense search catches paraphrases. Fusion is done with Reciprocal Rank Fusion because cosine similarity and BM25 scores live on different scales and cannot be blended directly; RRF combines them by *rank position* instead, so no tuning constant is needed.
 
-**Why rerank?** BM25 and vector search are recall-oriented — they always return *something*. The cross-encoder reads each candidate chunk together with the query (rather than comparing precomputed embeddings) and is far more accurate at judging relevance, so it filters the ~40 fused candidates down to the 5 worth spending LLM context on.
+**Why rerank?** BM25 and vector search are recall-oriented — they always return *something*. The cross-encoder reads each candidate chunk together with the query (rather than comparing precomputed embeddings) and is far more accurate at judging relevance, so it filters the ~40 fused candidates down to the 8 worth spending LLM context on.
 
 Models used (all defined at the top of `ragpart.py`):
 
