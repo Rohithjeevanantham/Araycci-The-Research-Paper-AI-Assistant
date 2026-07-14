@@ -1,4 +1,7 @@
 # Araycci - The Research Paper AI Assistant
+
+**🚀 Live app: [araycci.streamlit.app](https://araycci.streamlit.app/)**
+
 ## Overview
 
 Araycci Research Paper AI Assistant is an interactive research assistant built using Streamlit. This application allows users to process and cluster local PDF files, search and download research papers from ArXiv, and ask questions about the content. The bot provides answers based on the processed text and supports translation and audio generation for responses.
@@ -85,12 +88,22 @@ Retrieval depth (`DENSE_TOP_K`, `SPARSE_TOP_K`, `FINAL_TOP_N`) is tunable via co
 
 ## Usage
 
+### Hosted
+
+The app is deployed on Streamlit Community Cloud: **https://araycci.streamlit.app/**
+
+### Running locally
+
 1. **Run the Streamlit app**:
     ```sh
     streamlit run app.py
     ```
 
-2. **Open the provided URL** in your browser to access the app.
+2. **Open the app** in your browser: **http://localhost:8501**
+
+    (Streamlit prints this URL on startup. Use `--server.port 8502` to run on a different port.)
+
+> **Deployment note:** the hosted app does not read `.streamlit/secrets.toml` (that file is gitignored and never leaves your machine). Its keys live in the Streamlit Cloud dashboard under **App settings → Secrets**, in the same `[general]` format. If you rotate your keys, update them there too or the deployed app will stop answering queries.
 
 ## App Functionality
 
