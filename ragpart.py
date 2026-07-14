@@ -146,7 +146,7 @@ def store_chunks_in_pinecone(chunks, index, max_batch_size_mb=2):
     for vector in vectors:
         vector_size = sys.getsizeof(json.dumps(vector))
         if current_batch_size + vector_size > max_batch_size_bytes:
-            index.upsert(current_batch)
+            index.upsert(vectors=current_batch)
             current_batch = [vector]
             current_batch_size = vector_size
         else:
@@ -154,7 +154,7 @@ def store_chunks_in_pinecone(chunks, index, max_batch_size_mb=2):
             current_batch_size += vector_size
 
     if current_batch:
-        index.upsert(current_batch)
+        index.upsert(vectors=current_batch)
 
 def dense_search(query, index, top_k=DENSE_TOP_K):
     """Semantic search via Pinecone. Returns corpus indices, best first."""
