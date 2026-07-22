@@ -12,6 +12,7 @@ Araycci Research Paper AI Assistant is an interactive research assistant built u
 - **Web Search**: Search for research papers on ArXiv and download them.
 - **Clustering**: Cluster papers by similarity (TF-IDF + KMeans) so you can index one topic at a time.
 - **Hybrid Retrieval-Augmented Generation (RAG)**: Dense vector search *and* BM25 keyword search, fused with Reciprocal Rank Fusion and reranked by a cross-encoder — see [How retrieval works](#how-retrieval-works).
+- **Resumable Sessions**: Indexing stamps a `?ns=...` token into the URL and saves the chunk corpus to SQLite, so reopening that link after a restart rebuilds the keyword index and keeps your papers queryable without re-uploading.
 - **Translation**: Translate responses into English, French, or Spanish.
 - **Audio Generation**: Generate audio responses for the translated text.
 
@@ -21,7 +22,7 @@ A query is answered by four stages rather than a single vector lookup:
 
 ```
 query ──┬─ dense  : MiniLM embedding → Pinecone            → top 20 chunks
-        └─ sparse : BM25 over the session's chunk corpus   → top 20 chunks
+        └─ sparse : BM25 over the chunk corpus (SQLite)    → top 20 chunks
                               │
                     Reciprocal Rank Fusion (k=60)
                               │
@@ -138,6 +139,8 @@ Available once papers have been indexed via the **Local** tab.
 4. **Download Audio**: Download the spoken answer as an MP3.
 5. **End conversation**: Clears the index, the chunk corpus, and the BM25 index, resetting the session.
 
+> **Picking up where you left off:** once papers are indexed, the URL gains a `?ns=...` token. Keep that link (bookmark it, or just leave the tab open) and reopening it after the app restarts restores your indexed papers — no re-upload needed. Ending the conversation deletes the session's data and invalidates the token.
+
 ## Modules
 
 - **ragpart.py**: Handles hybrid retrieval-augmented generation, chunking, and text processing. Answers are generated with `meta-llama/Llama-3.1-8B-Instruct` via Hugging Face Inference Providers.
@@ -154,11 +157,17 @@ Available once papers have been indexed via the **Local** tab.
   - `combined_chunking`: Performs advanced chunking to prevent context loss.
 
 - **app.py**: The Streamlit UI and session flow.
-  - `index_chunks`: Indexes a chunk corpus for *both* halves of hybrid retrieval — dense vectors into Pinecone, and the chunk list plus its BM25 index into `st.session_state`.
+  - `index_chunks`: Indexes a chunk corpus for *both* halves of hybrid retrieval — dense vectors into Pinecone, and the chunk list plus its BM25 index into `st.session_state`. Also saves the corpus to SQLite and writes a `?ns=...` resume token into the URL.
+  - `resume_session_from_url`: Rebuilds the corpus, BM25 index, and Pinecone handle from the `?ns=...` token when a tab is reopened after a restart.
   - `expand_uploads`: Flattens the upload into individual PDFs, unpacking any ZIP archives so the Web tab's ZIP can be fed straight back in.
   - `process_local_pdfs`: Extracts and chunks uploaded PDFs (accepts either raw uploads or a clustered DataFrame).
   - `handle_query_response`: Runs retrieval, generation, translation, and audio.
-  - `reset_page`: Clears all session state, including the chunk corpus and BM25 index.
+  - `reset_page`: Clears all session state, including the chunk corpus and BM25 index, and deletes the persisted corpus and resume token.
+
+- **storage.py**: Persists the chunk corpus to SQLite (`data/corpus.db`), keyed by Pinecone namespace, so BM25 can be rebuilt after a restart. Uses the standard library's `sqlite3` — no extra dependency.
+  - `save_corpus`: Replaces a namespace's stored chunks with a new list, preserving order.
+  - `load_corpus`: Returns a namespace's chunks in their original order, or `None` if nothing is stored.
+  - `delete_corpus`: Removes a namespace's chunks.
 
 - **translate.py**: Provides translation and text-to-speech functionalities.
   - `translate`: Translates text between English and the selected language.
@@ -171,7 +180,9 @@ Available once papers have been indexed via the **Local** tab.
   - `text_from_file_uploader`: Extracts text from uploaded files.
   - `tokenize_text`: Tokenizes and removes stopwords, for clustering.
 
-> **Note:** the chunk corpus lives in `st.session_state` because BM25 scores against local text — unlike dense search, it cannot query Pinecone. `index_chunks` and `reset_page` keep the Pinecone index, the corpus, and the BM25 index in lockstep.
+> **Note:** BM25 scores against local text — unlike dense search, it cannot query Pinecone — so the chunk corpus is held in `st.session_state` while the app runs and persisted to SQLite (`storage.py`) so it outlives the process. `index_chunks`, `reset_page`, and `resume_session_from_url` keep the Pinecone namespace, the stored corpus, and the BM25 index in lockstep.
+>
+> Resuming works off the `?ns=...` token written into the URL when indexing finishes: only a tab already holding that link can restore its own corpus, so opening the bare app URL always starts fresh rather than inheriting someone else's papers. Note this covers *restarting* the app — a full redeploy on Streamlit Community Cloud gets a fresh container with an empty disk, which takes the SQLite file with it.
 
 ## Contributing
 

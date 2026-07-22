@@ -8,3 +8,6 @@ venv/
 
 # Local planning notes
 ROADMAP.md
+
+# Persisted chunk corpus (SQLite)
+data/

@@ -7,6 +7,7 @@ from ragpart import (generate_response_from_chunks, get_relevant_chunks, create_
                      extract_text_from_pdf, clean_text, store_chunks_in_pinecone,
                      combined_chunking, build_bm25, get_embedding_model, get_reranker,
                      new_namespace, clear_namespace, condense_query)
+from storage import save_corpus, load_corpus, delete_corpus
 from translate import translate, generate_audio
 from arxiv import search_arxiv, process_docs2, clustering, text_from_file_uploader, tokenize_text
 
@@ -48,10 +49,22 @@ if 'history' not in st.session_state:
     st.session_state.history = []
 
 def reset_page():
-    # Drop this session's vectors first -- this needs the index and namespace,
-    # which the lines below are about to clear.
+    # Drop this session's vectors and its persisted corpus first -- both need
+    # the namespace, which the lines below are about to clear.
     if st.session_state.index is not None and st.session_state.namespace:
         clear_namespace(st.session_state.index, st.session_state.namespace)
+    if st.session_state.namespace:
+        try:
+            delete_corpus(st.session_state.namespace)
+        except Exception as e:
+            # st.toast, not st.warning: this runs as a widget callback and just
+            # before a forced rerun, and ordinary output written there has no
+            # stable place to land. Toasts are queued across the rerun.
+            st.toast(f"Could not remove the saved corpus for this session ({e}).", icon="⚠️")
+
+    # Drop the resume token too, or reopening the old URL would point at a
+    # namespace whose corpus and vectors were just deleted.
+    st.query_params.pop("ns", None)
 
     st.session_state.index = None
     st.session_state.namespace = None
@@ -77,6 +90,43 @@ def reset_page():
              if k.startswith("selected_") and k.split("_", 1)[1].isdigit()]
     for key in stale:
         st.session_state.pop(key, None)
+
+
+def resume_session_from_url():
+    """Rebuild a previous session's retrieval state from the `?ns=` URL token.
+
+    Session state dies with the process, so a restart would otherwise strand
+    already-indexed papers: the corpus and BM25 index are gone, and with the
+    namespace gone too the app cannot even tell which Pinecone vectors were
+    its own. The token in the URL is what survives, and it is enough to reload
+    the corpus, rebuild BM25, and point back at the right namespace.
+
+    Only ever resumes the namespace the current tab's URL already names, so
+    someone opening the bare app URL never inherits another user's papers.
+    """
+    if st.session_state.namespace is not None or "ns" not in st.query_params:
+        return
+
+    token = st.query_params["ns"]
+    chunks = load_corpus(token)
+    if not chunks:
+        st.query_params.pop("ns", None)  # nothing stored: stale or bogus token
+        return
+
+    index = create_index()
+    if not index:
+        st.warning("Could not reconnect to Pinecone to resume your previous session — starting fresh.")
+        st.query_params.pop("ns", None)
+        return
+
+    st.session_state.index = index
+    st.session_state.namespace = token
+    st.session_state.chunks = chunks
+    st.session_state.bm25 = build_bm25(chunks)
+    st.session_state.papers_downloaded = True
+
+
+resume_session_from_url()
 
 # Streamlit app
 st.sidebar.image("logo.jpg")
@@ -208,7 +258,19 @@ def index_chunks(combined_chunks):
         st.session_state.chunks = combined_chunks
         st.session_state.bm25 = build_bm25(combined_chunks)
 
+        # Persisted from the same list that was just upserted, so the stored
+        # order matches the positional ids Pinecone holds. Best-effort: the
+        # expensive half is already done and this session works regardless --
+        # only the ability to resume after a restart is at stake.
+        try:
+            save_corpus(st.session_state.namespace, combined_chunks)
+        except Exception as e:
+            st.warning(f"Could not save the corpus for later ({e}). This session "
+                       "still works, but restarting the app will lose it.")
+
     st.session_state.papers_downloaded = True
+    # The token that lets this tab pick up where it left off after a restart.
+    st.query_params["ns"] = st.session_state.namespace
     status.update(label=f"Indexed {n} chunks. Ready for questions.", state="complete")
     st.success("PDF processed and indexed successfully!")
 
